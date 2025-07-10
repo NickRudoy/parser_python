@@ -18,9 +18,7 @@ func main() {
 		maxRetries    = flag.Int("retries", 3, "Maximum number of retries")
 		outputFile    = flag.String("output", "sitemap_filters.xml", "Output sitemap file")
 		cacheFile     = flag.String("cache", "sitemap_cache.json", "Cache file path")
-		proxyURL      = flag.String("proxy", "", "Proxy URL (e.g., http://proxy:port)")
 		verbose       = flag.Bool("verbose", false, "Enable verbose logging")
-		fromCache     = flag.Bool("from-cache", false, "Create sitemap from existing cache only")
 	)
 	flag.Parse()
 
@@ -36,19 +34,7 @@ func main() {
 		MaxRetries: *maxRetries,
 		OutputFile: *outputFile,
 		CacheFile:  *cacheFile,
-		ProxyURL:   *proxyURL,
 		Logger:     logger,
-	}
-
-	// Проверяем, нужно ли создать sitemap только из кэша
-	if *fromCache {
-		logger.Info("Создание sitemap из существующего кэша...")
-		if err := CacheToSitemap(*cacheFile, *outputFile); err != nil {
-			logger.Error("Ошибка создания sitemap из кэша: %v", err)
-			os.Exit(1)
-		}
-		logger.Info("Sitemap успешно создан из кэша!")
-		return
 	}
 
 	// Создание генератора

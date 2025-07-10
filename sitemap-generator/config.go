@@ -11,7 +11,6 @@ type Config struct {
 	MaxRetries int
 	OutputFile string
 	CacheFile  string
-	ProxyURL   string
 	Logger     *Logger
 }
 

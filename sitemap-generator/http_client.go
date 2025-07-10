@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"net/url"
 	"time"
 )
 
@@ -13,32 +12,16 @@ type HTTPClient struct {
 	client  *http.Client
 	headers map[string]string
 	logger  *Logger
-	proxy   string
 }
 
 // NewHTTPClient создает новый HTTP клиент
-func NewHTTPClient(timeout int, headers map[string]string, logger *Logger, proxyURL string) *HTTPClient {
-	client := &http.Client{
-		Timeout: time.Duration(timeout) * time.Second,
-	}
-	
-	// Настраиваем прокси если указан
-	if proxyURL != "" {
-		proxyURLParsed, err := url.Parse(proxyURL)
-		if err != nil {
-			logger.Error("Ошибка парсинга прокси URL: %v", err)
-		} else {
-			client.Transport = &http.Transport{
-				Proxy: http.ProxyURL(proxyURLParsed),
-			}
-		}
-	}
-	
+func NewHTTPClient(timeout int, headers map[string]string, logger *Logger) *HTTPClient {
 	return &HTTPClient{
-		client:  client,
+		client: &http.Client{
+			Timeout: time.Duration(timeout) * time.Second,
+		},
 		headers: headers,
 		logger:  logger,
-		proxy:   proxyURL,
 	}
 }
 

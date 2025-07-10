@@ -22,7 +22,7 @@ type SitemapGenerator struct {
 
 // NewSitemapGenerator создает новый генератор sitemap
 func NewSitemapGenerator(config *Config) *SitemapGenerator {
-	client := NewHTTPClient(config.Timeout, DefaultHeaders, config.Logger, config.ProxyURL)
+	client := NewHTTPClient(config.Timeout, DefaultHeaders, config.Logger)
 	translit := NewTransliterator()
 	
 	return &SitemapGenerator{
