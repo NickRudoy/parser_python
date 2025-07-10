@@ -10,7 +10,3 @@ __pycache__/
 *.pyzwz
 *.json
 *.xml
-/sitemap-generator/go.sum
-/sitemap-generator/go.mod
-*.mod
-*.sum
