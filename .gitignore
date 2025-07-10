@@ -8,3 +8,7 @@ __pycache__/
 *.pywz
 *.pyzw
 *.pyzwz
+*.json
+*.xml
+/sitemap-generator/go.sum
+/sitemap-generator/go.mod
