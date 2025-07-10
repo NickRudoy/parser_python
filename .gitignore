@@ -12,3 +12,5 @@ __pycache__/
 *.xml
 /sitemap-generator/go.sum
 /sitemap-generator/go.mod
+*.mod
+*.sum
