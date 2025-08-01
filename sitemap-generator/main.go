@@ -12,13 +12,17 @@ func main() {
 	// Парсинг флагов командной строки
 	var (
 		baseURL       = flag.String("url", "https://obelisk.ru/catalog/pamyatniki", "Base URL for sitemap generation")
-		maxWorkers    = flag.Int("workers", 100, "Maximum number of concurrent workers")
-		timeout       = flag.Int("timeout", 2, "Request timeout in seconds")
-		batchSize     = flag.Int("batch", 200, "Batch size for URL processing")
-		maxRetries    = flag.Int("retries", 3, "Maximum number of retries")
+		maxWorkers    = flag.Int("workers", 20, "Maximum number of concurrent workers")  // Уменьшено с 100 до 20
+		timeout       = flag.Int("timeout", 5, "Request timeout in seconds")  // Увеличено с 2 до 5 секунд  
+		batchSize     = flag.Int("batch", 50, "Batch size for URL processing")  // Уменьшено с 200 до 50
+		maxRetries    = flag.Int("retries", 5, "Maximum number of retries")  // Увеличено с 3 до 5
 		outputFile    = flag.String("output", "sitemap_filters.xml", "Output sitemap file")
 		cacheFile     = flag.String("cache", "sitemap_cache.json", "Cache file path")
 		verbose       = flag.Bool("verbose", false, "Enable verbose logging")
+		semaphoreLimit = flag.Int("semaphore", 10, "Maximum concurrent requests (semaphore limit)")  // Новый параметр
+		minDelay      = flag.Int("min-delay", 200, "Minimum delay between requests in milliseconds")  // Новый параметр
+		maxDelay      = flag.Int("max-delay", 1000, "Maximum delay between requests in milliseconds")  // Новый параметр
+		ignoreCache   = flag.Bool("ignore-cache", false, "Ignore cache and recheck all URLs")  // Новый параметр
 	)
 	flag.Parse()
 
@@ -27,14 +31,18 @@ func main() {
 
 	// Создание конфигурации
 	config := &Config{
-		BaseURL:    *baseURL,
-		MaxWorkers: *maxWorkers,
-		Timeout:    *timeout,
-		BatchSize:  *batchSize,
-		MaxRetries: *maxRetries,
-		OutputFile: *outputFile,
-		CacheFile:  *cacheFile,
-		Logger:     logger,
+		BaseURL:        *baseURL,
+		MaxWorkers:     *maxWorkers,
+		Timeout:        *timeout,
+		BatchSize:      *batchSize,
+		MaxRetries:     *maxRetries,
+		OutputFile:     *outputFile,
+		CacheFile:      *cacheFile,
+		Logger:         logger,
+		SemaphoreLimit: *semaphoreLimit,  // Новое поле
+		MinDelay:       *minDelay,        // Новое поле
+		MaxDelay:       *maxDelay,        // Новое поле
+		IgnoreCache:    *ignoreCache,     // Новое поле
 	}
 
 	// Создание генератора

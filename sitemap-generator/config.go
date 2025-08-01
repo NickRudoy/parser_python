@@ -4,14 +4,18 @@ package main
 
 // Config содержит конфигурацию генератора sitemap
 type Config struct {
-	BaseURL    string
-	MaxWorkers int
-	Timeout    int
-	BatchSize  int
-	MaxRetries int
-	OutputFile string
-	CacheFile  string
-	Logger     *Logger
+	BaseURL        string
+	MaxWorkers     int
+	Timeout        int
+	BatchSize      int
+	MaxRetries     int
+	OutputFile     string
+	CacheFile      string
+	Logger         *Logger
+	SemaphoreLimit int  // Максимальное количество одновременных запросов
+	MinDelay       int  // Минимальная задержка между запросами в миллисекундах
+	MaxDelay       int  // Максимальная задержка между запросами в миллисекундах
+	IgnoreCache    bool // Игнорировать кэш и перепроверить все URL
 }
 
 // Headers для HTTP запросов

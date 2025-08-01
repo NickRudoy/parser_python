@@ -48,6 +48,7 @@ class PageSEOData:
     twitter_cards: Dict[str, str] = None
     duplicate_content: bool = False
     content_hash: str = ""
+    page_rank: float = 1.0  # Добавляем поле для внутреннего PageRank
     
     def __post_init__(self):
         self.h1 = self.h1 or []
@@ -114,6 +115,10 @@ class SEOFrogScanner:
             'analyze_performance': True,
             'max_response_time': 5,  # seconds
             'min_word_count': 300,
+            'main_domain_only': True,  # Сканировать только основной домен (без поддоменов)
+            'calculate_pagerank': True,  # Рассчитывать внутренний PageRank
+            'pagerank_damping': 0.85,  # Коэффициент затухания для PageRank
+            'pagerank_iterations': 10,  # Количество итераций для расчета PageRank
         }
 
         # Модифицируем структуру для хранения ошибок
@@ -157,6 +162,103 @@ class SEOFrogScanner:
             return True
         return self.robots_parser.can_fetch(self.headers['User-Agent'], url)
 
+    def get_main_domain(self, url: str) -> str:
+        """Извлекает основной домен из URL (без поддоменов)"""
+        parsed = urlparse(url)
+        domain_parts = parsed.netloc.replace('www.', '').split('.')
+        if len(domain_parts) >= 2:
+            # Берем последние две части домена (например, example.com из sub.example.com)
+            return '.'.join(domain_parts[-2:])
+        return parsed.netloc.replace('www.', '')
+
+    def is_main_domain_only(self, url: str) -> bool:
+        """Проверяет, является ли URL основным доменом (без поддоменов)"""
+        if not self.config['main_domain_only']:
+            return True
+        
+        parsed = urlparse(url)
+        domain_parts = parsed.netloc.replace('www.', '').split('.')
+        
+        # Если домен имеет более 2 частей, это поддомен
+        if len(domain_parts) > 2:
+            return False
+        
+        # Проверяем, что это тот же основной домен
+        main_domain = self.get_main_domain(url)
+        return main_domain == self.get_main_domain(self.start_url)
+
+    def calculate_internal_pagerank(self):
+        """Рассчитывает внутренний PageRank для всех страниц"""
+        if not self.config['calculate_pagerank'] or not self.pages_data:
+            return
+        
+        self.add_log("Начинаем расчет внутреннего PageRank...", "info")
+        
+        # Инициализируем PageRank для всех страниц
+        urls = list(self.pages_data.keys())
+        pagerank = {url: 1.0 / len(urls) for url in urls}
+        
+        # Создаем матрицу переходов
+        transition_matrix = {}
+        for url in urls:
+            page_data = self.pages_data[url]
+            outlinks = [link for link in page_data.outlinks if link in self.pages_data]
+            
+            if outlinks:
+                # Равномерно распределяем вес между исходящими ссылками
+                weight_per_link = 1.0 / len(outlinks)
+                transition_matrix[url] = {outlink: weight_per_link for outlink in outlinks}
+            else:
+                # Если нет исходящих ссылок, распределяем вес между всеми страницами
+                transition_matrix[url] = {other_url: 1.0 / len(urls) for other_url in urls}
+        
+        # Итеративный расчет PageRank
+        damping_factor = self.config['pagerank_damping']
+        iterations = self.config['pagerank_iterations']
+        
+        for iteration in range(iterations):
+            new_pagerank = {}
+            
+            for url in urls:
+                # Формула PageRank: PR(p) = (1-d)/N + d * sum(PR(i)/C(i))
+                # где d - коэффициент затухания, N - количество страниц, C(i) - количество исходящих ссылок
+                
+                # Базовая вероятность (случайный переход)
+                base_prob = (1 - damping_factor) / len(urls)
+                
+                # Вероятность перехода по ссылкам
+                link_prob = 0.0
+                for source_url, transitions in transition_matrix.items():
+                    if url in transitions:
+                        link_prob += pagerank[source_url] * transitions[url]
+                
+                new_pagerank[url] = base_prob + damping_factor * link_prob
+            
+            # Нормализация
+            total_rank = sum(new_pagerank.values())
+            if total_rank > 0:
+                for url in urls:
+                    new_pagerank[url] /= total_rank
+            
+            pagerank = new_pagerank
+            
+            if (iteration + 1) % 5 == 0:
+                self.add_log(f"PageRank итерация {iteration + 1}/{iterations}", "info")
+        
+        # Обновляем PageRank в данных страниц
+        for url, rank in pagerank.items():
+            self.pages_data[url].page_rank = rank
+        
+        # Сортируем страницы по PageRank для отображения топ-страниц
+        sorted_pages = sorted(pagerank.items(), key=lambda x: x[1], reverse=True)
+        
+        self.add_log(f"PageRank рассчитан! Топ-5 страниц:", "success")
+        for i, (url, rank) in enumerate(sorted_pages[:5]):
+            short_url = url.split('/')[-1] if url.split('/')[-1] else url.split('/')[-2]
+            self.add_log(f"  {i+1}. {short_url}: {rank:.4f}", "info")
+        
+        return pagerank
+
     async def analyze_page(self, session: aiohttp.ClientSession, url: str, html: str, response) -> PageSEOData:
         """Анализ страницы и сбор SEO-данных"""
         start_time = time.time()
@@ -191,7 +293,10 @@ class SEOFrogScanner:
             page_data.robots_meta = robots_meta['content'] if robots_meta else ""
 
             # Подсчет слов и размер контента
-            text_content = ' '.join([p.get_text(strip=True) for p in soup.find_all(['p', 'div', 'span', 'article'])])
+            text_elements = []
+            for tag in ['p', 'div', 'span', 'article']:
+                text_elements.extend([elem.get_text(strip=True) for elem in soup.find_all(tag)])
+            text_content = ' '.join(text_elements)
             page_data.word_count = len(re.findall(r'\w+', text_content))
             page_data.content_length = len(html)
 
@@ -221,12 +326,12 @@ class SEOFrogScanner:
 
             # Open Graph
             if self.config['check_social_tags']:
-                for og in soup.find_all('meta', property=re.compile('^og:')):
+                for og in soup.find_all('meta', attrs={'property': re.compile('^og:')}):
                     page_data.open_graph[og['property']] = og.get('content', '')
 
             # Twitter Cards
             if self.config['check_social_tags']:
-                for twitter in soup.find_all('meta', name=re.compile('^twitter:')):
+                for twitter in soup.find_all('meta', attrs={'name': re.compile('^twitter:')}):
                     page_data.twitter_cards[twitter['name']] = twitter.get('content', '')
 
             # Hreflang
@@ -321,6 +426,37 @@ class SEOFrogScanner:
         
         return table
 
+    def generate_pagerank_table(self) -> Table:
+        """Создание таблицы с топ-страницами по PageRank"""
+        table = Table(box=box.ROUNDED, title="🏆 Топ-10 страниц по PageRank")
+        table.add_column("Ранг", style="cyan", justify="center")
+        table.add_column("URL", style="blue", width=40)
+        table.add_column("PageRank", justify="right")
+        table.add_column("Входящие ссылки", justify="center")
+        table.add_column("Исходящие ссылки", justify="center")
+
+        # Сортируем страницы по PageRank
+        sorted_pages = sorted(
+            self.pages_data.items(), 
+            key=lambda x: x[1].page_rank, 
+            reverse=True
+        )[:10]
+
+        for i, (url, data) in enumerate(sorted_pages, 1):
+            short_url = url.split('/')[-1] if url.split('/')[-1] else url.split('/')[-2]
+            if not short_url:
+                short_url = url.split('/')[-3] if len(url.split('/')) > 2 else url
+            
+            table.add_row(
+                str(i),
+                Text(short_url, overflow="ellipsis"),
+                f"{data.page_rank:.4f}",
+                str(len(data.inlinks)),
+                str(len(data.outlinks))
+            )
+        
+        return table
+
     def generate_display(self) -> Layout:
         """Создание основного интерфейса"""
         layout = Layout()
@@ -359,13 +495,30 @@ class SEOFrogScanner:
             Layout(
                 Panel(
                     self.generate_seo_table(),
-                    title="🔍 Поледние страницы",
+                    title="🔍 Последние страницы",
                     border_style="cyan"
                 ),
                 size=60
             )
         )
-        layout["main"].update(main_layout)
+        
+        # Добавляем таблицу PageRank, если есть данные
+        if self.pages_data and any(data.page_rank > 0 for data in self.pages_data.values()):
+            pagerank_layout = Layout()
+            pagerank_layout.split_column(
+                main_layout,
+                Layout(
+                    Panel(
+                        self.generate_pagerank_table(),
+                        title="🏆 PageRank Анализ",
+                        border_style="green"
+                    ),
+                    size=12
+                )
+            )
+            layout["main"].update(pagerank_layout)
+        else:
+            layout["main"].update(main_layout)
 
         # Футер с текущим URL
         footer_content = Panel(
@@ -400,15 +553,20 @@ class SEOFrogScanner:
                 url = f"https://{url}"
                 parsed_url = urlparse(url)
             
+            # Очищаем URL
+            clean_url = f"{parsed_url.scheme}://{parsed_url.netloc}{parsed_url.path}"
+            if parsed_url.query:
+                clean_url += f"?{parsed_url.query}"
+            
             # Убираем www и нормализуем домен
             netloc = parsed_url.netloc.replace('www.', '')
             if netloc != self.domain.replace('www.', ''):
                 return
 
-            # Очищаем URL
-            clean_url = f"{parsed_url.scheme}://{parsed_url.netloc}{parsed_url.path}"
-            if parsed_url.query:
-                clean_url += f"?{parsed_url.query}"
+            # Проверяем, что это основной домен (без поддоменов)
+            if not self.is_main_domain_only(clean_url):
+                self.add_log(f"Пропускаем поддомен: {clean_url}", "warning")
+                return
             
             if clean_url in self.visited_urls:
                 return
@@ -457,11 +615,12 @@ class SEOFrogScanner:
                     links = set()  # Используем set для уникальных ссылок
                     
                     # Ищем ссылки во всех возможных местах
-                    for link in soup.find_all(['a', 'link', 'area', 'base'], href=True):
-                        href = link.get('href', '').strip()
-                        if href and not href.startswith(('#', 'mailto:', 'tel:', 'javascript:', 'data:')):
-                            full_url = urljoin(clean_url, href)
-                            links.add(full_url)
+                    for tag_name in ['a', 'link', 'area', 'base']:
+                        for link in soup.find_all(tag_name, href=True):
+                            href = link.get('href', '').strip()
+                            if href and not href.startswith(('#', 'mailto:', 'tel:', 'javascript:', 'data:')):
+                                full_url = urljoin(clean_url, href)
+                                links.add(full_url)
                     
                     # Фильтруем и обрабатываем ссылки
                     tasks = []
@@ -470,7 +629,8 @@ class SEOFrogScanner:
                         next_domain = parsed_next.netloc.replace('www.', '')
                         if (next_domain == self.domain.replace('www.', '') and 
                             self.can_fetch(next_url) and 
-                            next_url not in self.visited_urls):
+                            next_url not in self.visited_urls and
+                            self.is_main_domain_only(next_url)):  # Добавляем проверку основного домена
                             tasks.append(process_url(next_url, depth + 1, clean_url))
                     
                     # Обрабатываем ссылки небольшими группами
@@ -501,6 +661,9 @@ class SEOFrogScanner:
                 'Количество слов': data.word_count,
                 'Время ответа': f"{data.response_time:.2f}",
                 'Дубликат': data.duplicate_content,
+                'PageRank': f"{data.page_rank:.4f}",
+                'Входящие ссылки': len(data.inlinks),
+                'Исходящие ссылки': len(data.outlinks),
                 'Проблемы': self.get_page_issues(data)
             })
 
@@ -535,6 +698,29 @@ class SEOFrogScanner:
             df_duplicates = pd.DataFrame(duplicates_data)
             df_duplicates.to_excel('seo_отчет_дубликаты.xlsx', index=False)
 
+        # Отчет по PageRank
+        if self.config['calculate_pagerank'] and self.pages_data:
+            pagerank_data = []
+            sorted_pages = sorted(
+                self.pages_data.items(), 
+                key=lambda x: x[1].page_rank, 
+                reverse=True
+            )
+            
+            for url, data in sorted_pages:
+                pagerank_data.append({
+                    'URL': url,
+                    'PageRank': data.page_rank,
+                    'Входящие ссылки': len(data.inlinks),
+                    'Исходящие ссылки': len(data.outlinks),
+                    'Заголовок': data.title,
+                    'Статус': data.status_code,
+                    'Количество слов': data.word_count
+                })
+            
+            df_pagerank = pd.DataFrame(pagerank_data)
+            df_pagerank.to_excel('seo_отчет_pagerank.xlsx', index=False)
+
         # Отчет по редиректам
         if self.redirects:
             redirects_data = [
@@ -552,7 +738,7 @@ class SEOFrogScanner:
         if self.error_urls or self.not_found_urls:
             errors_data = []
             
-            # Обработка 404 о��ибок
+            # Обработка 404 ошибок
             for error in self.not_found_urls:
                 sources = self.error_sources.get(error['url'], [])
                 errors_data.append({
@@ -686,7 +872,11 @@ class SEOFrogScanner:
                     await self.fetch_robots_txt(session)
                     await self.scan_site(session, live)
 
-            await self.export_results()
+                    # Рассчитываем внутренний PageRank после завершения сканирования
+                    if self.config['calculate_pagerank']:
+                        self.calculate_internal_pagerank()
+
+                    await self.export_results()
             
             self.add_log("Сканирование завершено!", "success")
             self.add_log(f"Проанализировано страниц: {self.total_scanned}", "success")
@@ -702,6 +892,11 @@ class SEOFrogScanner:
                 "sitemap.xml"  # Added sitemap XML report
             ]:
                 self.console.print(f"- {report}")
+            
+            # Добавляем отчет PageRank, если он был создан
+            if self.config['calculate_pagerank'] and self.pages_data:
+                self.console.print("- seo_отчет_pagerank.xlsx")
+            
             self.console.print(f"- {self.error_log_file} (лог ошибок)")
         
         except Exception as e:

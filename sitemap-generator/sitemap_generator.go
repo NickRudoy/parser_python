@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/xml"
 	"fmt"
+	"math/rand"
 	"os"
 	"sync"
 	"time"
@@ -18,12 +19,16 @@ type SitemapGenerator struct {
 	metrics     *Metrics
 	validator   *URLValidator
 	filterParser *FilterParser
+	semaphore    chan struct{}  // Семафор для ограничения одновременных запросов
 }
 
 // NewSitemapGenerator создает новый генератор sitemap
 func NewSitemapGenerator(config *Config) *SitemapGenerator {
 	client := NewHTTPClient(config.Timeout, DefaultHeaders, config.Logger)
 	translit := NewTransliterator()
+	
+	// Создаем семафор для ограничения одновременных запросов
+	semaphore := make(chan struct{}, config.SemaphoreLimit)
 	
 	return &SitemapGenerator{
 		config:       config,
@@ -33,12 +38,16 @@ func NewSitemapGenerator(config *Config) *SitemapGenerator {
 		metrics:      NewMetrics(),
 		validator:    NewURLValidator(),
 		filterParser: NewFilterParser(client, translit),
+		semaphore:    semaphore,
 	}
 }
 
 // Generate генерирует sitemap
 func (s *SitemapGenerator) Generate(ctx context.Context) error {
 	s.config.Logger.Info("Начало генерации sitemap")
+	
+	// Инициализируем генератор случайных чисел
+	rand.Seed(time.Now().UnixNano())
 	
 	// Загружаем кэш
 	if err := s.cache.Load(); err != nil {
@@ -61,6 +70,23 @@ func (s *SitemapGenerator) Generate(ctx context.Context) error {
 	urlsToCheck := s.generator.GenerateURLs(filters)
 	s.metrics.SetTotal(len(urlsToCheck))
 	s.config.Logger.Info("Сгенерировано URL для проверки: %d", len(urlsToCheck))
+	
+	// Показываем примеры сгенерированных URL для отладки
+	s.config.Logger.Info("Примеры сгенерированных URL:")
+	for i, url := range urlsToCheck {
+		if i >= 10 { // Показываем только первые 10
+			break
+		}
+		s.config.Logger.Info("  %d: %s", i+1, url)
+	}
+	
+	// Уведомляем о более мягком режиме работы
+	s.config.Logger.Info("Используются консервативные настройки:")
+	s.config.Logger.Info("- Максимум воркеров: %d", s.config.MaxWorkers)
+	s.config.Logger.Info("- Максимум одновременных запросов: %d", s.config.SemaphoreLimit)
+	s.config.Logger.Info("- Задержка между запросами: %d-%d мс", s.config.MinDelay, s.config.MaxDelay)
+	s.config.Logger.Info("- Таймаут запроса: %d сек", s.config.Timeout)
+	s.config.Logger.Info("- Максимум попыток: %d", s.config.MaxRetries)
 	
 	// Проверяем URL
 	validURLs, err := s.checkURLs(ctx, urlsToCheck)
@@ -105,10 +131,13 @@ func (s *SitemapGenerator) getFilters(ctx context.Context) (map[string][]string,
 // checkURLs проверяет URL асинхронно
 func (s *SitemapGenerator) checkURLs(ctx context.Context, urls []string) ([]string, error) {
 	var validURLs []string
+	var mu sync.Mutex  // Мьютекс для защиты validURLs
+	
+	// Счетчики для отладки
+	var cacheHits, cacheValidHits, newChecks int
 	
 	// Создаем каналы для работы
 	urlChan := make(chan string, s.config.BatchSize)
-	resultChan := make(chan string, s.config.BatchSize)
 	
 	// Запускаем воркеры
 	var wg sync.WaitGroup
@@ -123,32 +152,55 @@ func (s *SitemapGenerator) checkURLs(ctx context.Context, urls []string) ([]stri
 				default:
 				}
 				
-				// Проверяем кэш
-				if entry, exists := s.cache.Get(url); exists {
-					if entry.Valid {
-						resultChan <- url
+				// Проверяем кэш (если не игнорируем его)
+				if !s.config.IgnoreCache {
+					if entry, exists := s.cache.Get(url); exists {
+						cacheHits++
+						if entry.Valid {
+							cacheValidHits++
+							mu.Lock()
+							validURLs = append(validURLs, url)
+							mu.Unlock()
+						}
+						continue
 					}
-					continue
 				}
 				
+				newChecks++
+				s.config.Logger.Debug("Проверяем новый URL: %s", url)
+				
+				// Используем семафор для ограничения одновременных запросов
+				s.semaphore <- struct{}{}
+				
+				// Случайная задержка перед запросом для имитации человеческого поведения
+				delay := time.Duration(s.config.MinDelay + rand.Intn(s.config.MaxDelay - s.config.MinDelay)) * time.Millisecond
+				time.Sleep(delay)
+				
 				// Проверяем URL
-				valid, err := s.client.CheckURL(ctx, url, s.config.MaxRetries)
+				valid, err := s.client.CheckURL(ctx, url, s.config.MaxRetries, s.config.MinDelay, s.config.MaxDelay)
 				if err != nil {
 					s.config.Logger.Debug("Ошибка проверки %s: %v", url, err)
 				}
+				
+				// Освобождаем семафор
+				<-s.semaphore
 				
 				// Сохраняем в кэш
 				s.cache.Set(url, valid)
 				
 				if valid {
-					resultChan <- url
+					mu.Lock()
+					validURLs = append(validURLs, url)
+					mu.Unlock()
 					s.metrics.IncrementValid()
+					s.config.Logger.Debug("URL валиден: %s", url)
 				} else {
 					s.metrics.IncrementFailed()
+					s.config.Logger.Debug("URL невалиден: %s", url)
 				}
 				
-				// Добавляем небольшую задержку между запросами
-				time.Sleep(50 * time.Millisecond)
+				// Дополнительная задержка между запросами в рамках одного воркера
+				time.Sleep(time.Duration(200 + rand.Intn(300)) * time.Millisecond)
 			}
 		}()
 	}
@@ -165,16 +217,15 @@ func (s *SitemapGenerator) checkURLs(ctx context.Context, urls []string) ([]stri
 		}
 	}()
 	
-	// Собираем результаты
-	go func() {
-		wg.Wait()
-		close(resultChan)
-	}()
+	// Ждем завершения воркеров
+	wg.Wait()
 	
-	// Собираем валидные URL
-	for url := range resultChan {
-		validURLs = append(validURLs, url)
-	}
+	// Выводим статистику кэша
+	s.config.Logger.Info("Статистика проверки URL:")
+	s.config.Logger.Info("- URL из кэша: %d", cacheHits)
+	s.config.Logger.Info("- Валидных из кэша: %d", cacheValidHits)
+	s.config.Logger.Info("- Новых проверок: %d", newChecks)
+	s.config.Logger.Info("- Итого валидных: %d", len(validURLs))
 	
 	return validURLs, nil
 }
